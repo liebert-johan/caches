@@ -1,6 +1,6 @@
 #ifndef LIRS_CACHE_HPP
 #define LIRS_CACHE_HPP
-
+#include "cache.hpp"
 #include <list>
 #include <unordered_map>
 #include <stdexcept>
@@ -21,13 +21,16 @@ struct Block {
 };
 
 template<typename Key, typename T>
-class Lirs_cache {
+class Lirs_cache: public ICache<Key, T> {
 private:
+
     size_t lir_size_limit_;
     size_t hir_size_limit_;
     size_t history_size_limit_;
     size_t current_lir_count_ = 0;
-
+    float distribution = 0.95f;
+    int64_t cache_hit_count_ = 0;
+    int64_t cache_miss_count_ = 0;
     using CacheList = std::list<Block<Key, T>>;
     using ListIterator = typename CacheList::iterator;
     using TempList = std::list<Key>;
@@ -38,21 +41,36 @@ private:
 
     std::unordered_map<Key, TempIterator> temp_hash;
     TempList temp_cache;
-
+    
 public:
-    Lirs_cache(size_t lir_size, size_t hir_size)
-        : lir_size_limit_(lir_size), hir_size_limit_(hir_size) {
-        if ((lir_size == 0) || (hir_size == 0)) {
+    Lirs_cache(size_t capacity, class ICache<Key, T>* next_cache_layer_init) {
+	if (distribution >= 1 || distribution <= 0) {
+	    throw std::invalid_argument("distribution between lir and hir cache must be > 0 and < 1");
+	}	
+	lir_size_limit_ = static_cast<size_t>(capacity * distribution);
+        if (lir_size_limit_ == 0 && capacity > 0) {
+           lir_size_limit_ = 1;
+         }
+        hir_size_limit_ = (capacity > lir_size_limit_) ? (capacity - lir_size_limit_) : 1;
+	if ((hir_size_limit_ == 0) || (lir_size_limit_ == 0)) {
             throw std::invalid_argument("cache sizes must be positive");
         }
-        history_size_limit_ = 2 * lir_size + hir_size;
+        history_size_limit_ = 2 * lir_size_limit_ + hir_size_limit_;
+	this->set(next_cache_layer_init);
     }
-
+    void set_next_layer(ICache<Key, T>* next) override { this->next_cache_layer = next; }
+    
     bool full_lir() const { return current_lir_count_ >= lir_size_limit_; }
     bool full_temp() const { return temp_hash.size() >= hir_size_limit_; }
+    
+    int64_t get_hits() const override {return cache_hit_count_;}
+    size_t capacity() override {return lir_size_limit_ + hir_size_limit_;}
+    int64_t get_misses() const override {return cache_miss_count_;} 
+   
+   
     bool in_main_cache(const Key& key) const { return main_hash.find(key) != main_hash.end(); }
+    
     bool in_temp_cache(const Key& key) const { return temp_hash.find(key) != temp_hash.end(); }
-
     void clean_main() {
         while (!main_cache.empty()) {
             auto it = std::prev(main_cache.end());
@@ -89,20 +107,22 @@ public:
         return true;
     }
 
-    template<typename F>
-    bool lookup_update(const Key& key, F fetch_func) {
-        // Hit
+    T lookup_update(const Key& key, const std::function<T(const Key&, ICache<Key, T>*)>& fetch_func) override {
         if (in_main_cache(key)) {
             ListIterator main_it = main_hash[key];
             if (main_it->block_status == BlockStatus::HIR_NON_RESIDENT) {
-                main_it->block_data = std::make_unique<T>(fetch_func(key));
+                main_it->block_data = std::make_unique<T>(fetch_func(key, ICache<Key, T>::next_cache_layer));
+                cache_miss_count_++;
+            } else {
+                cache_hit_count_++;
             }
             pull_up_main(key);
-            return true;
+            return *(main_hash[key]->block_data);
         }
 
         // Miss
-        Block<Key, T> new_block = request_for_server(key, fetch_func);
+        cache_miss_count_++;
+        Block<Key, T> new_block = request(key, fetch_func);
         push_front_main(std::move(new_block));
         push_back_temp(key);
 
@@ -111,14 +131,14 @@ public:
             current_lir_count_++;
             delete_from_tempo(key);
         }
-        return false;
-    }
 
+        return *(main_hash[key]->block_data);
+    }
 private:
     void enforce_history_limit() {
         if (main_hash.size() <= history_size_limit_) return;
-
-        auto it = main_cache.rbegin();
+        
+	auto it = main_cache.rbegin();
         while (it != main_cache.rend()) {
             if (it->block_status == BlockStatus::HIR_NON_RESIDENT) {
                 main_hash.erase(it->key);
@@ -130,8 +150,8 @@ private:
     }
 
     template<typename F>
-    Block<Key, T> request_for_server(const Key& key, F fetch_func) {
-        return Block<Key, T>{key, std::make_unique<T>(fetch_func(key)), BlockStatus::HIR_RESIDENT};
+    Block<Key, T> request(const Key& key, F fetch_func) {
+        return Block<Key, T>{key, std::make_unique<T>(fetch_func(key, ICache<Key, T>::next_cache_layer)), BlockStatus::HIR_RESIDENT};
     }
 
     bool demote_main_elem() {
