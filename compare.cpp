@@ -10,6 +10,7 @@
 #include "lfu.hpp"
 #include "2q.hpp"
 #include "arc.hpp"
+#include "lirs_cache.hpp"
 
 using Cache = ICache<int, int>;
 
@@ -23,6 +24,9 @@ std::unique_ptr<Cache> make_cache(const std::string& name, int size) {
 
     if (name == "ARC")
         return std::unique_ptr<Cache>(new ArcCache<int, int>(size));
+
+    if (name == "LIRS")
+        return std::unique_ptr<Cache>(new Lirs_cache<int, int>(size));
 
     throw std::invalid_argument("Unknown cache: " + name);
 }
@@ -57,7 +61,7 @@ void compare(const Situation& situation, const std::vector<std::string>& algorit
     std::cout << "\n\n";
 
     std::cout << std::left
-              << std::setw(24) << "Combination"
+              << std::setw(26) << "Combination"
               << std::setw(12) << "L1 misses";
 
     if (levels >= 2)
@@ -115,7 +119,7 @@ void compare(const Situation& situation, const std::vector<std::string>& algorit
                     l1->lookup_update(key, fetch);
                 }
 
-                std::cout << std::setw(24) << combination
+                std::cout << std::setw(26) << combination
                           << std::setw(12) << l1->get_misses();
 
                 if (levels >= 2)
@@ -265,7 +269,7 @@ Situation make_documents(int request_count, int document_count) {
 
 int main() {
     std::vector<std::string> algorithms = {
-        "LFU", "2Q", "ARC"
+        "LFU", "2Q", "ARC", "LIRS"
     };
 
     // Числа — номера запрашиваемых объектов.

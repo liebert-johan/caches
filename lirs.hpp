@@ -1,11 +1,17 @@
-#ifndef LIRS_CACHE_HPP
-#define LIRS_CACHE_HPP
-#include "cache.hpp"
+#pragma once
+
+#include <cstddef>
+#include <functional>
+#include <stdint.h>
+#include <memory>
 #include <list>
 #include <unordered_map>
 #include <stdexcept>
-#include <memory>
 #include <utility>
+#include "cache.hpp"
+
+#ifndef LIRS_CACHE_HPP
+#define LIRS_CACHE_HPP
 
 enum class BlockStatus { 
     LIR, 
@@ -14,201 +20,224 @@ enum class BlockStatus {
 };
 
 template<typename Key, typename T>
-struct Block {
-    Key key;
-    std::unique_ptr<T> block_data;
-    BlockStatus block_status;
+struct LirsNode {
+    std::unique_ptr<T> data;
+    BlockStatus status;
+    
+    bool is_in_S = false;
+    typename std::list<Key>::iterator S_it;
+    
+    bool is_in_Q = false;
+    typename std::list<Key>::iterator Q_it;
 };
 
 template<typename Key, typename T>
-class Lirs_cache: public ICache<Key, T> {
+class Lirs_cache : public ICache<Key, T> {
 private:
-
-    size_t lir_size_limit_;
-    size_t hir_size_limit_;
-    size_t history_size_limit_;
-    size_t current_lir_count_ = 0;
-    float distribution = 0.95f;
-    int64_t cache_hit_count_ = 0;
-    int64_t cache_miss_count_ = 0;
-    using CacheList = std::list<Block<Key, T>>;
-    using ListIterator = typename CacheList::iterator;
-    using TempList = std::list<Key>;
-    using TempIterator = typename TempList::iterator;
-
-    std::unordered_map<Key, ListIterator> main_hash;
-    CacheList main_cache;
-
-    std::unordered_map<Key, TempIterator> temp_hash;
-    TempList temp_cache;
+    size_t lir_capacity_;
+    size_t hir_capacity_;
+    size_t max_S_size_;
+    size_t lir_count_;
     
-public:
-    Lirs_cache(size_t capacity, class ICache<Key, T>* next_cache_layer_init) {
-	if (distribution >= 1 || distribution <= 0) {
-	    throw std::invalid_argument("distribution between lir and hir cache must be > 0 and < 1");
-	}	
-	lir_size_limit_ = static_cast<size_t>(capacity * distribution);
-        if (lir_size_limit_ == 0 && capacity > 0) {
-           lir_size_limit_ = 1;
-         }
-        hir_size_limit_ = (capacity > lir_size_limit_) ? (capacity - lir_size_limit_) : 1;
-	if ((hir_size_limit_ == 0) || (lir_size_limit_ == 0)) {
-            throw std::invalid_argument("cache sizes must be positive");
-        }
-        history_size_limit_ = 2 * lir_size_limit_ + hir_size_limit_;
-	this->set(next_cache_layer_init);
-    }
-    void set_next_layer(ICache<Key, T>* next) override { this->next_cache_layer = next; }
+    int64_t hits_;
+    int64_t misses_;
     
-    bool full_lir() const { return current_lir_count_ >= lir_size_limit_; }
-    bool full_temp() const { return temp_hash.size() >= hir_size_limit_; }
+    std::list<Key> stack_S_; 
+    std::list<Key> queue_Q_; 
+    std::unordered_map<Key, LirsNode<Key, T>> storage_;
     
-    int64_t get_hits() const override {return cache_hit_count_;}
-    size_t capacity() override {return lir_size_limit_ + hir_size_limit_;}
-    int64_t get_misses() const override {return cache_miss_count_;} 
-   
-   
-    bool in_main_cache(const Key& key) const { return main_hash.find(key) != main_hash.end(); }
-    
-    bool in_temp_cache(const Key& key) const { return temp_hash.find(key) != temp_hash.end(); }
-    void clean_main() {
-        while (!main_cache.empty()) {
-            auto it = std::prev(main_cache.end());
-            if (it->block_status != BlockStatus::LIR) {
-                main_hash.erase(it->key);
-                main_cache.pop_back();
+    void prune_stack_S() {
+        while (!stack_S_.empty()) {
+            Key bottom_key = stack_S_.back();
+            LirsNode<Key, T>& node = storage_[bottom_key];
+            
+            if (node.status != BlockStatus::LIR) {
+                node.is_in_S = false;
+                stack_S_.pop_back();
+                
+                if (node.status == BlockStatus::HIR_NON_RESIDENT) {
+                    storage_.erase(bottom_key);
+                }
             } else {
                 break;
             }
         }
     }
 
-    bool delete_from_tempo(const Key& key) {
-        auto it = temp_hash.find(key);
-        if (it == temp_hash.end()) {
-            return false;
+    void evict_from_Q() {
+        while (queue_Q_.size() >= hir_capacity_) {
+            Key evict_key = queue_Q_.front();
+            queue_Q_.pop_front();
+            LirsNode<Key, T>& node = storage_[evict_key];
+            
+            node.data.reset(); 
+            node.is_in_Q = false;
+            
+            if (node.is_in_S) {
+                node.status = BlockStatus::HIR_NON_RESIDENT;
+            } else {
+                storage_.erase(evict_key);
+            }
         }
-        temp_cache.erase(it->second);
-        temp_hash.erase(it);
-        return true;
     }
 
-    bool up_main(const Key& key) {
-        auto main_it = main_hash.find(key);
-        if (main_it == main_hash.end()) {
-            return false;
+    void demote_bottom_LIR() {
+        if (lir_count_ > lir_capacity_ && !stack_S_.empty()) {
+            Key bottom_key = stack_S_.back();
+            LirsNode<Key, T>& node = storage_[bottom_key];
+            
+            if (node.status == BlockStatus::LIR) {
+                node.status = BlockStatus::HIR_RESIDENT;
+                lir_count_--;
+                
+                queue_Q_.push_back(bottom_key);
+                node.Q_it = std::prev(queue_Q_.end());
+                node.is_in_Q = true;
+            }
         }
-        main_cache.splice(main_cache.begin(), main_cache, main_it->second);
-
-        if (main_it->second->block_status != BlockStatus::LIR) {
-            main_it->second->block_status = BlockStatus::LIR;
-            current_lir_count_++;
-        }
-        return true;
     }
+
+    void enforce_history_limit() {
+        while (stack_S_.size() > max_S_size_) {
+            bool erased = false;
+            auto it = stack_S_.rbegin();
+            while (it != stack_S_.rend()) {
+                Key k = *it;
+                if (storage_[k].status == BlockStatus::HIR_NON_RESIDENT) {
+                    storage_.erase(k);
+                    stack_S_.erase((++it).base());
+                    erased = true;
+                    break;
+                }
+                ++it;
+            }
+            if (!erased) break;
+        }
+    }
+
+    void handle_hit_in_stack_S(const Key& key, LirsNode<Key, T>& node) {
+        if (node.status == BlockStatus::HIR_RESIDENT) {
+            node.status = BlockStatus::LIR;
+            lir_count_++;
+            
+            queue_Q_.erase(node.Q_it);
+            node.is_in_Q = false;
+            
+            stack_S_.erase(node.S_it);
+            stack_S_.push_front(key);
+            node.S_it = stack_S_.begin();
+
+            demote_bottom_LIR();
+            prune_stack_S();
+        } else if (node.status == BlockStatus::LIR) {
+            stack_S_.erase(node.S_it);
+            stack_S_.push_front(key);
+            node.S_it = stack_S_.begin();
+            prune_stack_S();
+        }
+    }
+
+    void handle_hit_in_queue_Q(const Key& key, LirsNode<Key, T>& node) {
+        stack_S_.push_front(key);
+        node.S_it = stack_S_.begin();
+        node.is_in_S = true;
+
+        queue_Q_.erase(node.Q_it);
+        queue_Q_.push_back(key);
+        node.Q_it = std::prev(queue_Q_.end());
+    }
+
+    void handle_miss_non_resident(const Key& key, LirsNode<Key, T>& node, std::unique_ptr<T> fetched_data) {
+        node.data = std::move(fetched_data);
+        node.status = BlockStatus::LIR;
+        lir_count_++;
+        
+        stack_S_.erase(node.S_it);
+        stack_S_.push_front(key);
+        node.S_it = stack_S_.begin();
+        node.is_in_S = true;
+
+        evict_from_Q();
+        demote_bottom_LIR();
+        prune_stack_S();
+    }
+
+    void handle_pure_miss(const Key& key, std::unique_ptr<T> fetched_data) {
+        LirsNode<Key, T> new_node;
+        new_node.data = std::move(fetched_data);
+        
+        if (lir_count_ < lir_capacity_) {
+            new_node.status = BlockStatus::LIR;
+            lir_count_++;
+            stack_S_.push_front(key);
+            new_node.S_it = stack_S_.begin();
+            new_node.is_in_S = true;
+        } else {
+            new_node.status = BlockStatus::HIR_RESIDENT;
+            evict_from_Q();
+            
+            stack_S_.push_front(key);
+            new_node.S_it = stack_S_.begin();
+            new_node.is_in_S = true;
+            
+            queue_Q_.push_back(key);
+            new_node.Q_it = std::prev(queue_Q_.end());
+            new_node.is_in_Q = true;
+        }
+        storage_[key] = std::move(new_node);
+    }
+
+public:
+    Lirs_cache(size_t capacity, ICache<Key, T>* next_layer = nullptr, float distribution = 0.95f) 
+        : lir_count_(0), hits_(0), misses_(0) {
+        if (distribution <= 0.0f || distribution >= 1.0f) {
+            throw std::invalid_argument("Distribution must be > 0 and < 1");
+        }    
+        
+        lir_capacity_ = static_cast<size_t>(capacity * distribution);
+        if (lir_capacity_ == 0 && capacity > 0) lir_capacity_ = 1;
+        hir_capacity_ = (capacity > lir_capacity_) ? (capacity - lir_capacity_) : 1;
+        max_S_size_ = (lir_capacity_ + hir_capacity_) * 3; 
+        
+        this->set_next_layer(next_layer);
+    }
+
+    void set_next_layer(ICache<Key, T>* next) override {
+        this->next_cache_layer = next;
+    } 
+    Lirs_cache(const Lirs_cache&) = delete;
+    Lirs_cache& operator=(const Lirs_cache&) = delete;
+    
+    int64_t get_hits() const override { return hits_; }
+    size_t capacity() const override { return lir_capacity_ + hir_capacity_; }
+    int64_t get_misses() const override { return misses_; } 
 
     T lookup_update(const Key& key, const std::function<T(const Key&, ICache<Key, T>*)>& fetch_func) override {
-        if (in_main_cache(key)) {
-            ListIterator main_it = main_hash[key];
-            if (main_it->block_status == BlockStatus::HIR_NON_RESIDENT) {
-                main_it->block_data = std::make_unique<T>(fetch_func(key, ICache<Key, T>::next_cache_layer));
-                cache_miss_count_++;
-            } else {
-                cache_hit_count_++;
+        auto it = storage_.find(key);
+        bool in_cache = (it != storage_.end());
+
+        if (in_cache && it->second.data != nullptr) {
+            hits_++;
+            if (it->second.is_in_S) {
+                handle_hit_in_stack_S(key, it->second);
+            } else if (it->second.is_in_Q) {
+                handle_hit_in_queue_Q(key, it->second);
             }
-            pull_up_main(key);
-            return *(main_hash[key]->block_data);
+            return *(it->second.data);
         }
 
-        // Miss
-        cache_miss_count_++;
-        Block<Key, T> new_block = request(key, fetch_func);
-        push_front_main(std::move(new_block));
-        push_back_temp(key);
+        misses_++;
+        std::unique_ptr<T> fetched_data = std::make_unique<T>(fetch_func(key, this->get_next_layer()));
 
-        if (!full_lir()) {
-            main_hash[key]->block_status = BlockStatus::LIR;
-            current_lir_count_++;
-            delete_from_tempo(key);
+        if (in_cache && it->second.status == BlockStatus::HIR_NON_RESIDENT) {
+            handle_miss_non_resident(key, it->second, std::move(fetched_data));
+        } else {
+            handle_pure_miss(key, std::move(fetched_data));
         }
-
-        return *(main_hash[key]->block_data);
-    }
-private:
-    void enforce_history_limit() {
-        if (main_hash.size() <= history_size_limit_) return;
         
-	auto it = main_cache.rbegin();
-        while (it != main_cache.rend()) {
-            if (it->block_status == BlockStatus::HIR_NON_RESIDENT) {
-                main_hash.erase(it->key);
-                main_cache.erase(std::next(it).base());
-                return;
-            }
-            ++it;
-        }
-    }
-
-    template<typename F>
-    Block<Key, T> request(const Key& key, F fetch_func) {
-        return Block<Key, T>{key, std::make_unique<T>(fetch_func(key, ICache<Key, T>::next_cache_layer)), BlockStatus::HIR_RESIDENT};
-    }
-
-    bool demote_main_elem() {
-        if (main_cache.empty()) return false;
-        auto it = std::prev(main_cache.end());
-        if (it->block_status == BlockStatus::LIR) {
-            it->block_status = BlockStatus::HIR_RESIDENT;
-            current_lir_count_--;
-            push_back_temp(it->key);
-            return true;
-        }
-        return false;
-    }
-
-    bool pull_up_main(const Key& key) {
-        if (!in_main_cache(key)) return false;
-
-        BlockStatus prev_status = main_hash[key]->block_status;
-        up_main(key);
-
-        if (prev_status == BlockStatus::LIR) {
-            clean_main();
-        } else if (prev_status == BlockStatus::HIR_RESIDENT) {
-            delete_from_tempo(key);
-            demote_main_elem();
-            clean_main();
-        } else if (prev_status == BlockStatus::HIR_NON_RESIDENT) {
-            demote_main_elem();
-            clean_main();
-        }
-        return true;
-    }
-
-    bool push_back_temp(const Key& key) {
-        if (full_temp()) {
-            Key oldest_key = temp_cache.front();
-
-            auto main_it = main_hash.find(oldest_key);
-            if (main_it != main_hash.end()) {
-                main_it->second->block_status = BlockStatus::HIR_NON_RESIDENT;
-                main_it->second->block_data.reset();
-                clean_main();
-                enforce_history_limit();
-            }
-            temp_hash.erase(oldest_key);
-            temp_cache.pop_front();
-        }
-
-        temp_cache.push_back(key);
-        temp_hash[key] = std::prev(temp_cache.end());
-        return true;
-    }
-
-    void push_front_main(Block<Key, T> block) {
-        main_cache.push_front(std::move(block));
-        main_hash[main_cache.front().key] = main_cache.begin();
+        enforce_history_limit();
+        return *(storage_[key].data);
     }
 };
 
-#endif // LIRS_CACHE_HPP
+#endif
