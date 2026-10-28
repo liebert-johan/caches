@@ -39,11 +39,7 @@ struct Situation {
     std::vector<int> requests;
 };
 
-void compare(
-    const Situation& situation,
-    const std::vector<std::string>& algorithms,
-    int levels
-) {
+void compare(const Situation& situation, const std::vector<std::string>& algorithms, int levels) {
     const int l1_size = 3;
     const int l2_size = 6;
     const int l3_size = 8;
@@ -155,6 +151,118 @@ void compare(
               << best_misses << "\n";
 }
 
+
+// Проверка параметров генерации.
+void check_parameters(int request_count, int object_count) {
+    if (request_count <= 0 || object_count <= 0) {
+        throw std::invalid_argument(
+            "Request count and object count must be positive"
+        );
+    }
+}
+
+// Дневник: некоторые ученики просматриваются чаще остальных.
+Situation make_school(int request_count, int student_count) {
+    check_parameters(request_count, student_count);
+
+    Situation result;
+    result.name = "School";
+
+    int frequent_students = student_count / 4;
+
+    if (frequent_students < 1)
+        frequent_students = 1;
+
+    for (int i = 0; i < request_count; ++i) {
+        int key;
+
+        if (i % 5 == 0)
+            key = i % student_count;
+        else
+            key = i % frequent_students;
+
+        result.requests.push_back(key);
+    }
+
+    return result;
+}
+
+// Магазин: популярные товары + одноразовые просмотры.
+Situation make_shop(int request_count, int popular_product_count) {
+    check_parameters(request_count, popular_product_count);
+
+    Situation result;
+    result.name = "Shop";
+
+    for (int i = 0; i < request_count; ++i) {
+        int key;
+
+        if (i % 5 == 0)
+            key = popular_product_count + i;
+        else
+            key = i % popular_product_count;
+
+        result.requests.push_back(key);
+    }
+
+    return result;
+}
+
+// Новости: в первой половине популярны одни статьи,
+// во второй половине — другой набор.
+Situation make_news(int request_count, int articles_per_period) {
+    check_parameters(request_count, articles_per_period);
+
+    Situation result;
+    result.name = "News";
+
+    for (int i = 0; i < request_count; ++i) {
+        int key;
+
+        if (i < request_count / 2)
+            key = i % articles_per_period;
+        else
+            key = articles_per_period + i % articles_per_period;
+
+        result.requests.push_back(key);
+    }
+
+    return result;
+}
+
+// Каталог: последовательный просмотр страниц по кругу.
+Situation make_catalog(int request_count, int page_count) {
+    check_parameters(request_count, page_count);
+
+    Situation result;
+    result.name = "Catalog";
+
+    for (int i = 0; i < request_count; ++i) {
+        int key = i % page_count;
+
+        result.requests.push_back(key);
+    }
+
+    return result;
+}
+
+// Документы: четыре обращения к одному документу,
+// затем переход к следующему; после последнего — в начало.
+Situation make_documents(int request_count, int document_count) {
+    check_parameters(request_count, document_count);
+
+    Situation result;
+    result.name = "Documents";
+
+    for (int i = 0; i < request_count; ++i) {
+        int key = (i / 4) % document_count;
+
+        result.requests.push_back(key);
+    }
+
+    return result;
+}
+
 int main() {
     std::vector<std::string> algorithms = {
         "LFU", "2Q", "ARC"
@@ -162,57 +270,13 @@ int main() {
 
     // Числа — номера запрашиваемых объектов.
     std::vector<Situation> situations = {
-        {
-            "School: repeated student requests",
-            {
-                1, 2, 1, 3, 1, 4, 2, 1,
-                3, 4, 3, 1, 2, 1, 4, 2,
-                1, 3, 1, 4, 2, 3, 2, 1
-            }
-        },
-        {
-            "Shop: popular products + one-time views",
-            {
-                1, 2, 1, 3, 1, 2,
-                10, 11, 12, 13, 14, 15, 16, 17,
-                1, 2, 3, 1, 2, 1,
-                18, 19, 20, 21, 22, 23, 24, 25,
-                1, 2, 3, 1, 2, 1
-            }
-        },
-        {
-            "News: popular articles change",
-            {
-                1, 2, 3, 4, 1, 2, 3, 4,
-                1, 2, 3, 4, 1, 2, 3, 4,
+        make_school(10000, 30),
+        make_shop(20000, 5),
+        make_news(15000, 20),
+        make_catalog(10000, 100),
+        make_documents(12000, 40)
 
-                11, 12, 13, 14, 11, 12, 13, 14,
-                11, 12, 13, 14, 11, 12, 13, 14,
-                11, 12, 13, 14, 11, 12, 13, 14
-            }
-        },
-        {
-            "Catalog: sequential browsing",
-            {
-                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
-                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
-                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12
-            }
-        },
-        {
-            "Documents: repeated work + return to old files",
-            {
-                1, 1, 1, 1,
-                2, 2, 2, 2,
-                3, 3, 3, 3,
-                4, 4, 4, 4,
-                5, 5, 5, 5,
-                6, 6, 6, 6,
-                7, 7, 7, 7,
-                8, 8, 8, 8,
-                1, 1, 2, 2, 3, 3
-            }
-        }
+
     };
 
     for (const auto& situation : situations) {
