@@ -10,7 +10,7 @@
 #include "lfu.hpp"
 #include "2q.hpp"
 #include "arc.hpp"
-#include "lirs_cache.hpp"
+#include "lirs.hpp"
 
 using Cache = ICache<int, int>;
 
